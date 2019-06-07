@@ -1,15 +1,58 @@
-﻿#Объект для данных из логфайла
+﻿#-NoLogo -NonInteractive -WindowStyle Hidden -Command
 
-$objWULog = New-Object -TypeName PSObject
+#Регистрируем локальный репозиторий
+try{
+    Get-PSRepository -Name $repo.Name -ErrorAction Stop
+}catch{
+    $uri = 'http://RepoNuget.study.loc:5000'
+    $repo = @{
+        Name = 'MyRepository'
+        SourceLocation = $uri
+        PublishLocation = $uri
+        InstallationPolicy = 'Trusted'
+    }
+    Register-PSRepository @repo
+}
 
+##Объект для данных из логфайла
+#$objWULog = New-Object -TypeName PSObject
+
+
+<#
+Параметры аутентификации передавать с мастер скрипта во время формирования файла
+#>
 #Логин/пароль учётки под которой запускается задание планировщика
-$UserId = ''
-$UserPassword = ''
+$UserId = 
+$UserPassword = 
 
 #Логин/пароль RollBack
-$UserRBId = ''
-$UserRDPassword = ''
+$UserRBId = 
+$UserRDPassword = 
 
+#Логин/пароль MySql
+$UserMysql = 
+$PasswordMysql = 
+$DBName = 
+$MySqlServer = 
+
+<#
+
+TODO - Запись логов в MySql базу данных
+#подключаем библиотеку MySql.Data.dll
+Add-Type –Path ‘.\MySql.Data.dll'
+
+# строка подключения к БД, server - имя севрера, uid - имя mysql пользователя, pwd- пароль, database - имя БД на сервере
+$Connection = [MySql.Data.MySqlClient.MySqlConnection]@{ConnectionString="server=$MySqlServer;uid=$UserMysql;pwd=$PasswordMysql;database=$DBName"}
+$Connection.Open()
+$sql = New-Object MySql.Data.MySqlClient.MySqlCommand
+$sql.Connection = $Connection
+
+#записываем информацию о каждом пользователе в табдицу БД
+$sql.CommandText = "INSERT INTO logs (host,message,status) VALUES ('c202pc16','WindowsUpdate Start','Ok')"
+$sql.ExecuteNonQuery()
+
+$Connection.Close()
+#>
 
 #Функция логирования событий
 function out-log{
@@ -24,8 +67,11 @@ function out-log{
     }
 }
 
-
-$sbSchTaskTrigger = {
+#Скрипт блок включает либо выключает триггер планировщика
+function Set-SchTaskTrigger {
+    param(
+        [switch] $triggerstatus
+    )
     #https://ubuntugeeks.com/questions/836887/toggling-enabled-disabled-on-specific-triggers-in-a-task-in-the-task-scheduler-u
     #Если триггер включен, то отключаем его и ноборот.
     $TaskScheduler = New-Object -COMObject Schedule.Service
@@ -33,21 +79,27 @@ $sbSchTaskTrigger = {
     $TaskFolder = $TaskScheduler.GetFolder("\") # If your task is in the root "folder"
     $Task = $TaskFolder.GetTask("WindowsUpdate")
     $Definition = $Task.Definition
+    $Definition.Triggers.Item(1).Enabled = $triggerstatus
+    <#
     if ($Definition.Triggers.Item(1).Enabled) {
         $Definition.Triggers.Item(1).Enabled = $False
     } else {
         $Definition.Triggers.Item(1).Enabled = $True
     }
-    $TaskFolder.RegisterTaskDefinition($Task.Name, $Definition, 4, $UserId, $UserPassword, $Task.Definition.Principal.LogonType)
+    #>
+    Write-Host $Task.Definition.Principal.LogonType
+    $TaskFolder.RegisterTaskDefinition($Task.Name, $Definition,6,$UserId,$UserPassword,1,$null)
 }
 
+#Скрипт блок выполняется при окончании процедуры установки обновлений
 $sbLogAndExit = {
     #Если нужно перезагрузиться, таки перезагрузись, не держи в себе
     if (Get-WURebootStatus -Silent){
         Restart-Computer
     }
     #Отключаем триггер по загрузке
-    & $sbSchTaskTrigger
+    ##Invoke-Command -ScriptBlock $Using:sbSchTaskTrigger -ArgumentList $false
+    Set-SchTaskTrigger -triggerstatus:$false
     ## Производим очистку системы
     Stop-Service wuauserv -Force
     Start-Sleep  -Seconds 5
@@ -76,6 +128,8 @@ $sbLogAndExit = {
         }
 
         out-log -service "WindowsUpdate" -message $updateslist -status "OK"
+        #Удаляем файл windowsupdate.log 
+        Remove-Item D:\windowsupdate.log -Force
         #снимок системы
         $err = $Error.Count
         & $env:ProgramFiles\Shield\ShdCmd.exe /snapshot /n "WSUS" /overwrite /u $UserRBId /p $UserRDPassword
@@ -84,8 +138,6 @@ $sbLogAndExit = {
         } else {
             out-log -service "RollBack" -message "New Snapshot" -status "Error"
         }
-        #Удаляем файл windowsupdate.log 
-        Remove-Item D:\windowsupdate.log -Force
     } else {
         out-log -service "WindowsUpdate" -message "Обновление не требуется" -status "OK"
     }
@@ -98,18 +150,25 @@ $sbLogAndExit = {
 ########
 #### Main block
 ########
+
+#Обновляем модуль до последней версии, если модуль ещё не установлен на хосте устанавливаем его
+try{
+    Update-Module -Name "PSWindowsUpdate" -Force -ErrorAction Stop
+}catch{
+    Install-Module -Name "PSWindowsUpdate"  -Repository  MyRepository
+}
+#Подключаем требуемый модуль
 try {
     Import-Module PSWindowsUpdate
-} catch 
-{
-    ##ToDo если нет модуля установить его 
-    Out-File d:\windowsupdate.err -Append
+} 
+catch {
+    out-log -service "Script" -message "Ошибка импорта модуля PSWindowsUpdate" -status "Error"
     [Environment]::Exit(1)
-    #throw "Don't install module PSWindowsUpdate"
 }
-#Включаем триггер запуска задачи при загрузке
-###Get-JobTrigger -Name "WindowsUpdate" -TriggerId 2 | Enable-JobTrigger
-& $sbSchTaskTrigger
+
+#Включаем триггер запуска задачи при загрузке хоста
+Set-SchTaskTrigger -triggerstatus:$true
+
 $maincycle = $true
 while ($maincycle){
     #Проверяем наличие обновлений
@@ -148,13 +207,16 @@ while ($maincycle){
             }
         } 
         #Установка обновлений
-        #Get-WUInstall -AcceptAll -AutoReboot -Install | ft -AutoSize | Out-String -Width 4096 | Out-File d:\windowsupdate.log -Append
+        Get-WUInstall -AcceptAll -Install | ft -AutoSize | Out-String -Width 4096 | Out-File d:\windowsupdate.log -Append
+        <#
+        Реализация создания лог файла через работу со свойствами объекта
         $out = Get-WUInstall -AcceptAll -IgnoreReboot -Install 
         foreach ($s in $out){
             $st.ComputerName
             $st.Status
             $st.Title
         }
+        #>
 
         if (Get-WURebootStatus -Silent){
             Restart-Computer
