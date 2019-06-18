@@ -33,64 +33,54 @@ Begin
 	#Импортируем список логинов и паролей из файла
 	$importedaccounts = Import-Csv $passfile  -Delimiter ";"
 
-    #Создаём credential объект для локального администратора удалённого хоста
-    $username = ($importedaccounts | where service -eq host).user
-    $pass = ($importedaccounts | where service -eq host).hashpassword | ConvertTo-SecureString
-    $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $username, $pass
-    $password = $cred.GetNetworkCredential().password
-    
-    #Получаем логин/пароль для ПО Rollback
-    $UserRBId = ($importedaccounts | where service -eq rollback).user
-    $pass = ($importedaccounts | where service -eq rollback).hashpassword | ConvertTo-SecureString
-    $credRB = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $UserRBId, $pass
-    $UserRBPassword = $credRB.GetNetworkCredential().password
-    
-    #Скрипт блок запускает откат удалённой системы к последней точке восстановления
-    $sbRollbacRestore = {
-        param(
-            [string] $UserRBId,
-            [string] $UserRBPassword
-        )
-        #Add-Content -Path d:\out.txt -Value $process
-        $process = Start-Process -FilePath $env:ProgramFiles\Shield\ShdCmd.exe -ArgumentList "/restore","/current","/u",$UserRBId,"/p","$UserRBPassword" 
-        #-RedirectStandardError d:\rderr.txt -RedirectStandardOutput d:\rdout.txt -Wait -PassThru
-        #Add-Content -Path d:\out.txt -Value $process.ExitCode
-    } 
+	#Создаём credential объект для локального администратора удалённого хоста
+	$username = ($importedaccounts | where service -eq host).user
+	$pass = ($importedaccounts | where service -eq host).hashpassword | ConvertTo-SecureString
+	$cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $username, $pass
+	$password = $cred.GetNetworkCredential().password
 
-    #Скрипт блок создает задания планировщика по обновлению систему и запускает его
-    $updateScript = Get-Content -Path $wupdatefile -Raw
-    $schedulerxml = Get-Content -Path $schedulerfile | Out-String
-    $sbWupdate = {
-        #Создаём файл wupdate.ps1, если такой файл уже есть, то перезаписываем его.
-        Write-Host "созадётся файл wupdate.ps1"
-        Set-Content C:\windows\tasks\wupdate.ps1 -Value $using:updateScript
-        ##Создаём задачу планировщика windowsupdate
-        Write-Host "созадётся Планировщик WindowsUpdate"
-        $TaskScheduler = New-Object -COMObject Schedule.Service
-        $TaskScheduler.Connect()
-        $TaskFolder = $TaskScheduler.GetFolder("\") # If your task is in the root "folder"
-        #Удаляем ранее созданную задачу
-        # Обернут в try чтобы не ругался если такой задачи нет
-        try {
-            $TaskFolder.DeleteTask("WindowsUpdate",0)
-        } catch {}
-        #Создаём новую задачу планировщика windowsupdate
-        $task = $TaskScheduler.NewTask($null)
-        $task.XmlText = $using:schedulerxml
-        $username = ($using:username).Split('\')[1]
-        $TaskFolder.RegisterTaskDefinition("WindowsUpdate",$task,6,$username,$using:password,1,$null) | Out-Null
-        # Запускаем планировщик
-        Write-Host "Запускается задание планировщика WindowsUpdate"
-        try{
-            #$TaskScheduler.Connect()
-            $TaskFolder = $TaskScheduler.GetFolder("\")
-            #$TaskFolder.GetTasks(0)
-            $TaskFolder.GetTask('\WindowsUpdate').Run($null) | Out-Null
-            Write-Host "Задание планировщика WindowsUpdate запущено"
-        } catch {
-            Write-Host "Отсутствует задание планировщика WindowsUpdate"
-        }
-    }
+	#Получаем логин/пароль для ПО Rollback
+	$UserRBId = ($importedaccounts | where service -eq rollback).user
+	$pass = ($importedaccounts | where service -eq rollback).hashpassword | ConvertTo-SecureString
+	$credRB = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $UserRBId, $pass
+	$UserRBPassword = $credRB.GetNetworkCredential().password
+
+	#Скрипт блок запускает откат удалённой системы к последней точке восстановления
+	$sbRollbacRestore = {
+        	param(
+			[string] $UserRBId,
+            		[string] $UserRBPassword
+        	)
+		#Add-Content -Path d:\out.txt -Value $process
+		$process = Start-Process -FilePath $env:ProgramFiles\Shield\ShdCmd.exe -ArgumentList "/restore","/current","/u",$UserRBId,"/p","$UserRBPassword" 
+		#-RedirectStandardError d:\rderr.txt -RedirectStandardOutput d:\rdout.txt -Wait -PassThru
+		#Add-Content -Path d:\out.txt -Value $process.ExitCode
+	} 
+
+	#Скрипт блок создает задания планировщика по обновлению систему и запускает его
+	$updateScript = Get-Content -Path $wupdatefile -Raw
+	$schedulerxml = Get-Content -Path $schedulerfile | Out-String
+	#TODO переносим логику обновления удалённого хоста сюда
+	#Отказываемся от работы через планировщик windows
+	$sbWupdate = {
+		#Регистрируем локальный репозиторий
+		try{
+		    Get-PSRepository -Name $repo.Name -ErrorAction Stop
+		}catch{
+		    $uri = 'http://RepoNuget.study.loc:5000'
+		    $repo = @{
+			Name = 'MyRepository'
+			SourceLocation = $uri
+			PublishLocation = $uri
+			InstallationPolicy = 'Trusted'
+		    }
+		    Register-PSRepository @repo
+		}
+		#Так как блок выполняется на удалённом хосте то запускаем обновление под учёткой 
+		#Установка обновлений
+		Get-WUInstall -AcceptAll -Install | ft -AutoSize | Out-String -Width 4096 | Out-File d:\windowsupdate.log -Append
+		$process = Start-Process -FilePath $env:ProgramFiles\Shield\ShdCmd.exe -ArgumentList "" -Credential $Using:cred 
+	}
 
 	function write-log {
 		param(
